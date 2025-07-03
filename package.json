@@ -23,15 +23,15 @@
     "bin.js"
   ],
   "scripts": {
-    "res:clean": "rescript clean",
-    "res:build": "rescript build",
+    "clean": "rescript clean",
+    "build": "rescript build",
     "tests:jest": "jest",
     "tests:rescript": "./bin.js __tests__/__fixtures__ __tests__/__fixtures__/components --with-native-for-rescript",
     "posttests:rescript": "rescript convert -all",
     "tests": "yarn tests:jest && yarn tests:rescript",
     "test": "yarn prerelease && yarn tests",
-    "prerelease": "yarn res:clean && yarn res:build && webpack",
-    "release": "npmpub"
+    "prerelease": "yarn clean && yarn build && webpack",
+    "release": "npmpub banana"
   },
   "dependencies": {
     "camelcase": "^6.0.0",

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="24" height="24" viewBox="0 0 24 24" fill="currentcolor" xmlns="http://www.w3.org/2000/svg"
+    xmlns:xlink="http://www.w3.org/1999/xlink">
+    <svg id="middlePoint" x="8" y="8" width="8" height="8" fill="currentcolor" xmlns="http://www.w3.org/2000/svg"
+        xmlns:xlink="http://www.w3.org/1999/xlink">
+        <circle cx="4" cy="4" r="4" fill="currentcolor" />
+    </svg>
+    <circle opacity="0.4" cx="12" cy="12" r="12" fill="currentcolor" />
+</svg> 

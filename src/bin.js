@@ -1,4 +1,4 @@
-const meow = require("meow");
+import meow from "meow";
 
 // UPDATE README IF YOU UPDATE THIS PLEASE
 const cli = meow(

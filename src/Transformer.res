@@ -27,6 +27,10 @@ let shortenFilenames = (sourcePath, files) =>
       ->Case.toPascal,
   })
 
+// Check if an icon is deprecated based on filename/path
+let isDeprecatedIcon = (filePath: string) =>
+  filePath->Js.String2.toLowerCase->Js.String2.includes("deprecated")
+
 let noop = s => s
 
 let transformSvg = (svg, ~removeFill, ~removeStroke, ~pascalCaseTag, ~js, ~template) => {
@@ -38,8 +42,8 @@ let transformSvg = (svg, ~removeFill, ~removeStroke, ~pascalCaseTag, ~js, ~templ
   ->dashToCamelCaseProps
   ->(pascalCaseTag ? tagToPascalCase : noop)
   ->(js ? cleanupEndWithoutSpace : cleanupEndWithSpace)
-  ->(removeFill ? deleteFill : noop)
-  ->(removeStroke ? deleteStroke : noop)
+  ->(removeFill ? deleteFill : handleMultipleFills)
+  ->(removeStroke ? deleteStroke : handleMultipleStrokes)
   ->template
 }
 
@@ -54,14 +58,27 @@ let transformFiles = (
   ~commonjs,
 ) =>
   files->Array.reduce([], (files, file) => {
+    let fillColors = AdjustSvg.extractFillColors(file.content)
+    let strokeColors = AdjustSvg.extractStrokeColors(file.content)
+    
+    // Extract original SVG tag attributes before any transformations
+    let (originalSvgFill, originalSvgStroke, _hasFill, _hasStroke) = Templates.validateAndExtractSvgAttributes(file.content)
+    
+    Js.log2("Fill colors", fillColors)
+    Js.log2("Stroke colors", strokeColors)
     let trsf = file.content->transformSvg(~removeFill, ~removeStroke)
     let trsfNative = () =>
-      trsf(~js=true, ~pascalCaseTag=true, ~template=Templates.native(~commonjs))
-    let trsfWeb = () => trsf(~js=true, ~pascalCaseTag=false, ~template=Templates.web(~commonjs))
+      trsf(~js=true, ~pascalCaseTag=true, ~template=Templates.native(~fillColors, ~strokeColors, ~commonjs))
+    let trsfWeb = () => trsf(~js=true, ~pascalCaseTag=false, ~template=Templates.web(~fillColors, ~strokeColors, ~commonjs))
+    
+    // Check if this is a deprecated icon
+    let isDeprecated = isDeprecatedIcon(file.name)
+    
     let trsfNativeForR = () =>
-      trsf(~js=false, ~pascalCaseTag=true, ~template=Templates.nativeForRescript)
+      trsf(~js=false, ~pascalCaseTag=true, ~template=Templates.nativeForRescriptWithDefaults(~fillColors, ~strokeColors, ~originalSvgFill, ~originalSvgStroke, ~isDeprecated))
     let trsfWebForR = () =>
-      trsf(~js=false, ~pascalCaseTag=false, ~template=Templates.webForRescript)
+      trsf(~js=false, ~pascalCaseTag=false, ~template=Templates.webForRescriptWithDefaults(~fillColors, ~strokeColors, ~originalSvgFill, ~originalSvgStroke, ~isDeprecated))
+      
     switch (withNative, withWeb, withNativeForRescript, withWebForRescript) {
     | (false, false, false, false) => files
     | (true, false, false, false) =>
@@ -157,7 +174,7 @@ let make = ((sourcePath, outputPath), flags) => {
         ~commonjs=flags.commonjs->Js.Undefined.toOption->Option.getWithDefault(false),
       )
     )
-    ->Future.tap(files => Js.log2("Files transformed", files->Array.length))
+    ->Future.tap(files => Js.log2("Files transformed banan", files->Array.length))
     ->Future.map(write(outputPath))
     ->Future.tap(files => Js.log2("Files written", files->Array.length))
 

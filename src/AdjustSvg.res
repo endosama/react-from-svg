@@ -140,3 +140,363 @@ let transformReScriptNativeMatrixProps = svg =>
   )
 let transformReScriptNativeFixupDigits = svg =>
   svg->Js.String2.replaceByRe(%re("/([{(,]-?)\\./g"), "$10.")
+
+// New ReScript-specific transformations for JSX fixes
+
+let transformClassToClassName = svg =>
+  svg->Js.String2.replaceByRe(%re("/\\bclass=\"([^\"]*)\"/g"), "className=\"$1\"")
+
+let transformReservedKeywords = svg =>
+  svg
+  // Transform in="..." to in_="..."
+  ->Js.String2.replaceByRe(%re("/\\bin=\"([^\"]*)\"/g"), "in_=\"$1\"")
+  // Transform type="..." to type_="..."
+  ->Js.String2.replaceByRe(%re("/\\btype=\"([^\"]*)\"/g"), "type_=\"$1\"")
+
+// Helper function to convert kebab-case to camelCase
+let kebabToCamelCase = str =>
+  str->Js.String2.unsafeReplaceBy1(%re("/-([a-z])/g"), (
+    _match,
+    letter,
+    _offset,
+    _wholeString,
+  ) => letter->Js.String2.toUpperCase)
+
+let transformStyleAttributes = svg =>
+  svg->Js.String2.unsafeReplaceBy1(%re("/\\bstyle=\"([^\"]*)\"/g"), (
+    _match,
+    styleValue,
+    _offset,
+    _wholeString,
+  ) => {
+    // Parse CSS string into individual properties
+    let cssProps = 
+      styleValue
+      ->Js.String2.split(";")
+      ->Belt.Array.map(Js.String2.trim)
+      ->Belt.Array.keep(prop => Js.String2.length(prop) > 0)
+      ->Belt.Array.keepMap(prop => {
+        let parts = prop->Js.String2.split(":")
+        switch parts {
+        | [key, value] => 
+          let trimmedKey = key->Js.String2.trim
+          let trimmedValue = value->Js.String2.trim->Js.String2.replaceByRe(%re("/^[\"']|[\"']$/g"), "")
+          if Js.String2.length(trimmedKey) > 0 && Js.String2.length(trimmedValue) > 0 {
+            Some({
+              "key": trimmedKey->kebabToCamelCase,
+              "value": trimmedValue
+            })
+          } else {
+            None
+          }
+        | _ => None
+        }
+      })
+
+    if Belt.Array.length(cssProps) == 0 {
+      "style=\"" ++ styleValue ++ "\""  // Return original if no valid properties
+    } else {
+      // Build ReScript ReactDOM.Style chain
+      let styleChain = 
+        cssProps
+        ->Belt.Array.reduce("ReactDOM.Style.make()", (acc, prop) =>
+          acc ++ "->ReactDOM.Style.unsafeAddProp(\"" ++ prop["key"] ++ "\", \"" ++ prop["value"] ++ "\")"
+        )
+      "style={" ++ styleChain ++ "}"
+    }
+  })
+
+let fixSvgAttributes = (svg, ~isDeprecated) => {
+  // Replace hardcoded className with dynamic ?className first
+  let newContent = svg->Js.String2.replaceByRe(%re("/className=\"[^\"]*\"/g"), "?className")
+
+  // Find the SVG element and fix attribute conflicts
+  let svgPattern = %re("/<svg([^>]*?)(\\s*>)/")
+  switch newContent->Js.String2.match_(svgPattern) {
+  | Some(matches) => 
+    switch matches {
+    | [_, svgAttributes, closingTag] =>
+      let cleanedAttributes = 
+        svgAttributes
+        // Remove hardcoded attributes that conflict with optional ones (case insensitive)
+        ->Js.String2.replaceByRe(%re("/\\s+stroke=\"[^\"]*\"/gi"), "")
+        ->Js.String2.replaceByRe(%re("/\\s+fill=\"[^\"]*\"/gi"), "")
+        ->Js.String2.replaceByRe(%re("/\\s+width=\"[^\"]*\"/gi"), "")
+        ->Js.String2.replaceByRe(%re("/\\s+height=\"[^\"]*\"/gi"), "")
+        ->Js.String2.replaceByRe(%re("/\\s+style=\"[^\"]*\"/gi"), "")
+        // Remove any existing fill/stroke ReScript attributes to avoid duplicates
+        ->Js.String2.replaceByRe(%re("/\\s+\\?fill\\b/g"), "")
+        ->Js.String2.replaceByRe(%re("/\\s+\\bfill\\b(?!\\s*=)/g"), "")
+        ->Js.String2.replaceByRe(%re("/\\s+\\?stroke\\b/g"), "")
+        ->Js.String2.replaceByRe(%re("/\\s+\\bstroke\\b(?!\\s*=)/g"), "")
+        ->Js.String2.replaceByRe(%re("/\\s+\\?className\\b/g"), "")
+
+      // Ensure proper spacing and add dynamic attributes
+      let spacedAttributes = cleanedAttributes->Js.String2.endsWith(" ") ? cleanedAttributes : cleanedAttributes ++ " "
+      
+      // Add dynamic attributes based on parameter type
+      let dynamicAttributes = if !isDeprecated {
+        // For non-deprecated, add direct references (they have default values)
+        "fill stroke"
+      } else {
+        // For deprecated, add optional references
+        "?fill ?stroke"
+      }
+      
+      let finalAttributes = spacedAttributes ++ dynamicAttributes ++ " ?className"
+      let newSvgTag = "<svg" ++ finalAttributes ++ closingTag
+      
+      newContent->Js.String2.replace("<svg" ++ svgAttributes ++ closingTag, newSvgTag)
+    | _ => newContent
+    }
+  | None => newContent
+  }
+}
+
+// New functions to handle multiple fills
+let extractFillColors = (svg: string): array<string> => {
+  // Extract all fill values from child elements (not the main SVG tag)
+  
+  // First, split the SVG into the opening tag and content
+  let svgTagEndIndex = svg->Js.String2.indexOf(">")
+  if svgTagEndIndex >= 0 {
+    let svgContent = svg->Js.String2.substringToEnd(~from=svgTagEndIndex + 1)
+    let fillMatches = svgContent->Js.String2.match_(%re("/fill=\"([^\"]+)\"/g"))
+    
+    switch fillMatches {
+    | None => []
+    | Some(matches) => {
+        let colors = matches
+          ->Belt.Array.keepMap(match => {
+            let colorMatch = match->Js.String2.match_(%re("/fill=\"([^\"]+)\"/"))
+            switch colorMatch {
+            | Some([_, color]) => Some(color)
+            | _ => None
+            }
+          })
+          ->Belt.Array.reduce([], (acc, color) => {
+            // Only add if not already in the array (deduplication)
+            acc->Belt.Array.some(c => c === color) ? acc : acc->Belt.Array.concat([color])
+          })
+        colors
+      }
+    }
+  } else {
+    // Fallback: extract from entire SVG if we can't find the tag end
+    let fillMatches = svg->Js.String2.match_(%re("/fill=\"([^\"]+)\"/g"))
+    
+    switch fillMatches {
+    | None => []
+    | Some(matches) => {
+        let colors = matches
+          ->Belt.Array.keepMap(match => {
+            let colorMatch = match->Js.String2.match_(%re("/fill=\"([^\"]+)\"/"))
+            switch colorMatch {
+            | Some([_, color]) => Some(color)
+            | _ => None
+            }
+          })
+          ->Belt.Array.reduce([], (acc, color) => {
+            // Only add if not already in the array (deduplication)
+            acc->Belt.Array.some(c => c === color) ? acc : acc->Belt.Array.concat([color])
+          })
+        colors
+      }
+    }
+  }
+}
+
+let replaceFillsWithProps = (svg: string, fillColors: array<string>): string => {
+  let result = ref(svg)
+  let dynamicFillCounter = ref(0)
+  
+  // Extract the original fill from the SVG tag
+  let svgTagMatch = svg->Js.String2.match_(%re("/<svg[^>]*fill=\"([^\"]+)\"/"))
+  let originalSvgFill = switch svgTagMatch {
+  | Some([_, fill]) => Some(fill)
+  | _ => None
+  }
+  
+  fillColors->Belt.Array.forEach((fillColor: string) => {
+    // Skip replacing "none" fills - keep them as literal fill="none"
+    if fillColor !== "none" {
+      // Determine prop name based on whether it matches SVG tag fill or is currentColor
+      let propName = if fillColor->Js.String2.toLowerCase === "currentcolor" {
+        "fill"
+      } else {
+        switch originalSvgFill {
+        | Some(svgFill) when fillColor === svgFill => "fill"
+        | _ => {
+            // Increment counter for dynamic fills
+            dynamicFillCounter := dynamicFillCounter.contents + 1
+            "fill" ++ dynamicFillCounter.contents->Belt.Int.toString
+          }
+        }
+      }
+      
+      // Escape special regex characters in the fill color
+      let escapedColor = fillColor
+        ->Js.String2.replaceByRe(%re("/[.*+?^${}()|[\]\\\\]/g"), "\\$&")
+      
+      // Create dynamic regex pattern and replace ALL occurrences EXCEPT in the SVG tag
+      let regexPattern = "fill=\"" ++ escapedColor ++ "\""
+      let replacement = propName === "fill" ? "fill" : "fill={" ++ propName ++ "}"
+      
+      // Split the SVG into the opening SVG tag and the rest
+      let svgTagEndIndex = result.contents->Js.String2.indexOf(">")
+      if svgTagEndIndex >= 0 {
+        let svgTag = result.contents->Js.String2.substring(~from=0, ~to_=svgTagEndIndex + 1)
+        let svgContent = result.contents->Js.String2.substringToEnd(~from=svgTagEndIndex + 1)
+        
+        // Only replace in the content, not in the SVG tag
+        let tempContent = ref(svgContent)
+        while tempContent.contents->Js.String2.includes(regexPattern) {
+          tempContent := tempContent.contents->Js.String2.replace(regexPattern, replacement)
+        }
+        result := svgTag ++ tempContent.contents
+      } else {
+        // Fallback: replace all occurrences if we can't find the SVG tag end
+        let tempResult = ref(result.contents)
+        while tempResult.contents->Js.String2.includes(regexPattern) {
+          tempResult := tempResult.contents->Js.String2.replace(regexPattern, replacement)
+        }
+        result := tempResult.contents
+      }
+    }
+  })
+  
+  result.contents
+}
+
+let handleMultipleFills = (svg: string): string => {
+  let fillColors = extractFillColors(svg)
+  if Belt.Array.length(fillColors) > 0 {
+    replaceFillsWithProps(svg, fillColors)
+  } else {
+    svg
+  }
+}
+
+// New functions to handle multiple strokes
+let extractStrokeColors = (svg: string): array<string> => {
+  // Extract all stroke values from child elements (not the main SVG tag)
+  
+  // First, split the SVG into the opening tag and content
+  let svgTagEndIndex = svg->Js.String2.indexOf(">")
+  if svgTagEndIndex >= 0 {
+    let svgContent = svg->Js.String2.substringToEnd(~from=svgTagEndIndex + 1)
+    let strokeMatches = svgContent->Js.String2.match_(%re("/stroke=\"([^\"]+)\"/g"))
+    
+    switch strokeMatches {
+    | None => []
+    | Some(matches) => {
+        let colors = matches
+          ->Belt.Array.keepMap(match => {
+            let colorMatch = match->Js.String2.match_(%re("/stroke=\"([^\"]+)\"/"))
+            switch colorMatch {
+            | Some([_, color]) => Some(color)
+            | _ => None
+            }
+          })
+          ->Belt.Array.reduce([], (acc, color) => {
+            // Only add if not already in the array (deduplication)
+            acc->Belt.Array.some(c => c === color) ? acc : acc->Belt.Array.concat([color])
+          })
+        colors
+      }
+    }
+  } else {
+    // Fallback: extract from entire SVG if we can't find the tag end
+    let strokeMatches = svg->Js.String2.match_(%re("/stroke=\"([^\"]+)\"/g"))
+    
+    switch strokeMatches {
+    | None => []
+    | Some(matches) => {
+        let colors = matches
+          ->Belt.Array.keepMap(match => {
+            let colorMatch = match->Js.String2.match_(%re("/stroke=\"([^\"]+)\"/"))
+            switch colorMatch {
+            | Some([_, color]) => Some(color)
+            | _ => None
+            }
+          })
+          ->Belt.Array.reduce([], (acc, color) => {
+            // Only add if not already in the array (deduplication)
+            acc->Belt.Array.some(c => c === color) ? acc : acc->Belt.Array.concat([color])
+          })
+        colors
+      }
+    }
+  }
+}
+
+let replaceStrokesWithProps = (svg: string, strokeColors: array<string>): string => {
+  let result = ref(svg)
+  let dynamicStrokeCounter = ref(0)
+  
+  // Extract the original stroke from the SVG tag
+  let svgTagMatch = svg->Js.String2.match_(%re("/<svg[^>]*stroke=\"([^\"]+)\"/"))
+  let originalSvgStroke = switch svgTagMatch {
+  | Some([_, stroke]) => Some(stroke)
+  | _ => None
+  }
+  
+  strokeColors->Belt.Array.forEach((strokeColor: string) => {
+    // Skip replacing "none" strokes - keep them as literal stroke="none"
+    if strokeColor !== "none" {
+      // Determine prop name based on whether it matches SVG tag stroke or is currentColor
+      let propName = if strokeColor->Js.String2.toLowerCase === "currentcolor" {
+        "stroke"
+      } else {
+        switch originalSvgStroke {
+        | Some(svgStroke) when strokeColor === svgStroke => "stroke"
+        | _ => {
+            // Increment counter for dynamic strokes
+            dynamicStrokeCounter := dynamicStrokeCounter.contents + 1
+            "stroke" ++ dynamicStrokeCounter.contents->Belt.Int.toString
+          }
+        }
+      }
+      
+      // Escape special regex characters in the stroke color
+      let escapedColor = strokeColor
+        ->Js.String2.replaceByRe(%re("/[.*+?^${}()|[\]\\\\]/g"), "\\$&")
+      
+      // Create dynamic regex pattern and replace ALL occurrences EXCEPT in the SVG tag
+      let regexPattern = "stroke=\"" ++ escapedColor ++ "\""
+      let replacement = propName === "stroke" ? "stroke" : "stroke={" ++ propName ++ "}"
+      
+      // Split the SVG into the opening SVG tag and the rest
+      let svgTagEndIndex = result.contents->Js.String2.indexOf(">")
+      if svgTagEndIndex >= 0 {
+        let svgTag = result.contents->Js.String2.substring(~from=0, ~to_=svgTagEndIndex + 1)
+        let svgContent = result.contents->Js.String2.substringToEnd(~from=svgTagEndIndex + 1)
+        
+        // Only replace in the content, not in the SVG tag
+        let tempContent = ref(svgContent)
+        while tempContent.contents->Js.String2.includes(regexPattern) {
+          tempContent := tempContent.contents->Js.String2.replace(regexPattern, replacement)
+        }
+        result := svgTag ++ tempContent.contents
+      } else {
+        // Fallback: replace all occurrences if we can't find the SVG tag end
+        let tempResult = ref(result.contents)
+        while tempResult.contents->Js.String2.includes(regexPattern) {
+          tempResult := tempResult.contents->Js.String2.replace(regexPattern, replacement)
+        }
+        result := tempResult.contents
+      }
+    }
+  })
+  
+  result.contents
+}
+
+let handleMultipleStrokes = (svg: string): string => {
+  let strokeColors = extractStrokeColors(svg)
+  if Belt.Array.length(strokeColors) > 0 {
+    replaceStrokesWithProps(svg, strokeColors)
+  } else {
+    svg
+  }
+}
